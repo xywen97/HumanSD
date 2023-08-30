@@ -188,6 +188,10 @@ class FrozenOpenCLIPEmbedder(AbstractEncoder):
         super().__init__()
         assert layer in self.LAYERS
         model, _, _ = open_clip.create_model_and_transforms(arch, device=torch.device('cpu'), pretrained=version)
+
+        # self.mapping_linear = nn.Linear(41984, 41984)
+
+        # self.model_for_image = FrozenOpenCLIPImageEmbedder(arch, version, device)
         del model.visual
         self.model = model
 
@@ -204,19 +208,122 @@ class FrozenOpenCLIPEmbedder(AbstractEncoder):
             raise NotImplementedError()
 
     def freeze(self):
-        self.model = self.model.eval()
+        # self.model = self.model.eval()
         for param in self.parameters():
             param.requires_grad = False
 
-    def forward(self, text):
+    def forward(self, text, goods=None, mae_model=None, mapping_linear=None):
+        # print(text)
+        '''
+        ****************************************************************************************************
+        torch.Size([12, 512, 512, 3])
+        ****************************************************************************************************
+        '''
+        # print("*" * 100)
+        # print(goods.shape)
+        # print("*" * 100)
+        # text of captions
+        # print(text)
+        # text[0] = 'A woman is wearing <1> <1> <1>.'
+        # text[1] = 'A man is wearing <2> <2> <2>.'
         tokens = open_clip.tokenize(text)
-        z = self.encode_with_transformer(tokens.to(self.device))
+        # print(tokens.shape)
+        # (12, 77)
+        image_embedding = None
+        if goods is not None:
+            # print("goods is not None")
+            # goods = goods.permute(0, 3, 1, 2)
+            # print(goods.shape)
+            # image_embedding = self.model_for_image.encode(goods)
+
+            # torch.Size([1, 3, 1024])
+            # print(image_embedding.shape)
+            image_embedding = goods
+
+            '''
+            flatten image embedding
+            '''
+            shape = image_embedding.shape
+            image_embedding = torch.flatten(image_embedding, start_dim=1)
+            # from (batch_size, 41, 1024) to (batch_size, 41, 32, 32)
+            image_embedding = image_embedding.reshape(shape[0], shape[1], 32, 32)
+            image_embedding = mapping_linear(image_embedding.float())
+            shape = (shape[0], 16, 1024)
+            # image_embedding = image_embedding.reshape(shape[0], shape[1], -1)
+            # print(image_embedding.shape)
+            # torch.Size([1, 3072])
+            '''
+            unfold image embedding
+            '''
+            image_embedding = torch.reshape(image_embedding, shape)
+
+            z = self.encode_with_transformer(tokens.to(self.device), image_embedding)
+        else:
+            # print("goods is None")
+            z = self.encode_with_transformer(tokens.to(self.device), image_embedding)
+        
         return z
 
-    def encode_with_transformer(self, text):
+    def encode_with_transformer(self, text, image_embedding=None):
+        # print("encode with transformer, imageembedding.shape: ", image_embedding.shape)
+        # print("*" * 100)
+        # print(text)
+        # print("*" * 100)
+        # find the position of tokens: 283, 272, 29
+        # index_list = []
+        # for batch in range(len(text)):
+        #     for i in range(len(text[batch])):
+        #         if text[batch][i] == 283 and text[batch][i+1] == 272 and text[batch][i+2] == 29:
+        #             index_list.append(i)
+        #             break
+
+
+        '''
+        3. for append mode of humansds
+        '''
+        # print("text tokens:", text)
+        # index_49407 = []
+        # if image_embedding is not None:
+        #     for batch in range(len(text)):
+        #         for i in range(len(text[batch])):
+        #             if text[batch][i] == 49407:
+        #                 index_49407.append(i)
+        #                 text[batch][i+image_embedding.shape[1]] = 49407
+        #                 # text[batch][i] = 111
+        #                 # for k in range(1, 15):
+        #                 #     text[batch][i+k] = 111
+        #                 break
+
         x = self.model.token_embedding(text)  # [batch_size, n_ctx, d_model]
+        '''
+        ****************************************************************************************************
+        x.shape after embedding: torch.Size([1, 77, 1024])
+        ****************************************************************************************************
+        以下都是1024
+        '''
+        # if image_embedding is not None:
+        #     for batch in range(len(x)):
+        #         # print(text[batch][index_list[batch]: index_list[batch] + image_embedding.shape[1]])
+        #         x[batch][index_49407[batch]: index_49407[batch] + image_embedding.shape[1], :] = image_embedding[batch]
+
+        #     # x[:, -1*image_embedding.shape[1]:, :] = image_embedding
+
+
+        '''
+        new format data
+        '''
+        if image_embedding is not None:
+            prefix = x[:, :2, :]
+            suffix = x[:, 2:, :]
+            x = torch.cat((prefix, image_embedding, suffix), dim=1)
+
+            # remove the part that is out of 77
+            x = x[:, :77, :]
+
         x = x + self.model.positional_embedding
+
         x = x.permute(1, 0, 2)  # NLD -> LND
+
         x = self.text_transformer_forward(x, attn_mask=self.model.attn_mask)
         x = x.permute(1, 0, 2)  # LND -> NLD
         x = self.model.ln_final(x)
@@ -232,8 +339,132 @@ class FrozenOpenCLIPEmbedder(AbstractEncoder):
                 x = r(x, attn_mask=attn_mask)
         return x
 
-    def encode(self, text):
-        return self(text)
+    def encode(self, text, goods=None, mapping_linear=None):
+        return self(text, goods=goods, mapping_linear=mapping_linear)
+
+    # def forward(self, text, goods=None, mae_model=None, mapping_linear=None):
+    #     # print(text)
+    #     '''
+    #     ****************************************************************************************************
+    #     torch.Size([12, 512, 512, 3])
+    #     ****************************************************************************************************
+    #     '''
+    #     # print("*" * 100)
+    #     # print(goods.shape)
+    #     # print("*" * 100)
+    #     # text of captions
+    #     # print(text)
+    #     # text[0] = 'A woman is wearing <1> <1> <1>.'
+    #     # text[1] = 'A man is wearing <2> <2> <2>.'
+    #     tokens = open_clip.tokenize(text)
+    #     # print(tokens.shape)
+    #     # (12, 77)
+    #     image_embedding = None
+    #     if goods is not None:
+    #         # goods = goods.permute(0, 3, 1, 2)
+    #         # print(goods.shape)
+    #         # image_embedding = self.model_for_image.encode(goods)
+
+    #         # torch.Size([1, 3, 1024])
+    #         # print(image_embedding.shape)
+    #         image_embedding = goods
+
+    #         '''
+    #         flatten image embedding
+    #         '''
+    #         shape = image_embedding.shape
+    #         image_embedding = torch.flatten(image_embedding, start_dim=1)
+    #         # from (batch_size, 41, 1024) to (batch_size, 41, 32, 32)
+    #         image_embedding = image_embedding.reshape(shape[0], shape[1], 32, 32)
+    #         image_embedding = mapping_linear(image_embedding.float())
+    #         shape = (shape[0], 8, 1024)
+    #         # image_embedding = image_embedding.reshape(shape[0], shape[1], -1)
+    #         # print(image_embedding.shape)
+    #         # torch.Size([1, 3072])
+    #         '''
+    #         unfold image embedding
+    #         '''
+    #         image_embedding = torch.reshape(image_embedding, shape)
+
+    #         z = self.encode_with_transformer(tokens.to(self.device), image_embedding)
+    #     else:
+    #         print("goods is None")
+    #         z = self.encode_with_transformer(tokens.to(self.device), image_embedding)
+        
+    #     return z
+
+    # def encode_with_transformer(self, text, image_embedding=None):
+    #     # print("encode with transformer, imageembedding.shape: ", image_embedding.shape)
+    #     # print("*" * 100)
+    #     # print(text)
+    #     # print("*" * 100)
+    #     # find the position of tokens: 283, 272, 29
+    #     # index_list = []
+    #     # for batch in range(len(text)):
+    #     #     for i in range(len(text[batch])):
+    #     #         if text[batch][i] == 283 and text[batch][i+1] == 272 and text[batch][i+2] == 29:
+    #     #             index_list.append(i)
+    #     #             break
+
+
+    #     '''
+    #     3. for append mode of humansds
+    #     '''
+    #     index_49407 = []
+    #     if image_embedding is not None:
+    #         for batch in range(len(text)):
+    #             for i in range(len(text[batch])):
+    #                 if text[batch][i] == 49407:
+    #                     index_49407.append(i)
+    #                     text[batch][i+image_embedding.shape[1]] = 49407
+    #                     # text[batch][i] = 111
+    #                     # for k in range(1, 15):
+    #                     #     text[batch][i+k] = 111
+    #                     break
+
+    #     x = self.model.token_embedding(text)  # [batch_size, n_ctx, d_model]
+    #     '''
+    #     ****************************************************************************************************
+    #     x.shape after embedding: torch.Size([1, 77, 1024])
+    #     ****************************************************************************************************
+    #     以下都是1024
+    #     '''
+    #     if image_embedding is not None:
+    #         for batch in range(len(x)):
+    #             # print(text[batch][index_list[batch]: index_list[batch] + image_embedding.shape[1]])
+    #             x[batch][index_49407[batch]: index_49407[batch] + image_embedding.shape[1], :] = image_embedding[batch]
+
+    #         # x[:, -1*image_embedding.shape[1]:, :] = image_embedding
+
+    #     x = x + self.model.positional_embedding
+
+    #     x = x.permute(1, 0, 2)  # NLD -> LND
+
+    #     x = self.text_transformer_forward(x, attn_mask=self.model.attn_mask)
+    #     x = x.permute(1, 0, 2)  # LND -> NLD
+    #     x = self.model.ln_final(x)
+    #     return x
+
+    # def text_transformer_forward(self, x: torch.Tensor, attn_mask=None):
+    #     for i, r in enumerate(self.model.transformer.resblocks):
+    #         if i == len(self.model.transformer.resblocks) - self.layer_idx:
+    #             break
+    #         if self.model.transformer.grad_checkpointing and not torch.jit.is_scripting():
+    #             x = checkpoint(r, x, attn_mask)
+    #         else:
+    #             x = r(x, attn_mask=attn_mask)
+    #     return x
+
+    # def encode(self, text, goods=None, mapping_linear=None):
+    #     return self(text, goods=goods, mapping_linear=mapping_linear)
+    
+    # def encode_token(self, text):
+    #     tokens = open_clip.tokenize(text)
+    #     return tokens
+    
+    # def encode_embedding(self, tokens, image_embedding=None):
+    #     return self.encode_with_transformer(tokens.to(self.device), image_embedding)
+
 
 
 class FrozenOpenCLIPImageEmbedder(AbstractEncoder):
@@ -281,15 +512,16 @@ class FrozenOpenCLIPImageEmbedder(AbstractEncoder):
 
     @autocast
     def forward(self, image, no_dropout=False):
-        z = self.encode_with_vision_transformer(image)
+        _, z = self.encode_with_vision_transformer(image)
         if self.ucg_rate > 0. and not no_dropout:
             z = torch.bernoulli((1. - self.ucg_rate) * torch.ones(z.shape[0], device=z.device))[:, None] * z
         return z
 
     def encode_with_vision_transformer(self, img):
         img = self.preprocess(img)
-        x = self.model.visual(img)
-        return x
+        # x_main means the top 3 embeddings of the image
+        x, x_main = self.model.visual(img)
+        return x, x_main
 
     def encode(self, text):
         return self(text)

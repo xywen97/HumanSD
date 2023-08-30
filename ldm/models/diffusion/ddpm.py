@@ -1,3 +1,5 @@
+
+
 """
 wild mixture of
 https://github.com/lucidrains/denoising-diffusion-pytorch/blob/7706bdfc6f527f58d33f84b7b522e61e6e3164b3/denoising_diffusion_pytorch/denoising_diffusion_pytorch.py
@@ -31,6 +33,11 @@ from mmpose.apis import init_pose_model
 from mmpose.core.evaluation import (aggregate_scale, aggregate_stage_flip,
                                     split_ae_outputs)
 
+'''
+added for project layer
+'''
+from transformers.activations import QuickGELUActivation as QuickGELU
+
 __conditioning_keys__ = {'concat': 'c_concat',
                          'crossattn': 'c_crossattn',
                          'adm': 'y'}
@@ -45,6 +52,35 @@ def disabled_train(self, mode=True):
 def uniform_on_device(r1, r2, shape, device):
     return (r1 - r2) * torch.rand(*shape, device=device) + r2
 
+class ProjLayer(nn.Module):
+    def __init__(self, in_dim, out_dim, hidden_dim, drop_p=0.1, eps=1e-12):
+        super().__init__()
+
+        self.conv1 = nn.Conv2d(197, 16, 3, padding=1)
+        self.flat = nn.Flatten()
+        # Dense1 -> Act -> Dense2 -> Drop -> Res -> Norm
+        self.dense1 = nn.Linear(in_dim, hidden_dim)
+        self.act_fn = QuickGELU()
+        self.dense2 = nn.Linear(hidden_dim, out_dim)
+        self.dropout = nn.Dropout(drop_p)
+
+        self.LayerNorm = nn.LayerNorm(out_dim, eps=eps)
+
+        # for param in self.parameters():
+        #     param.requires_grad = True
+
+    def forward(self, x):
+        # print(self.conv1[0].weight[0][0][0])
+        x = self.act_fn(self.conv1(x))
+        # x = self.conv1(x)
+        
+        x = x.reshape(x.shape[0], 16, -1)
+        x_in = x
+        x = self.LayerNorm(x)
+        x = self.dropout(self.dense2(self.act_fn(self.dense1(x)))) 
+        x = x + x_in
+
+        return x
 
 class DDPM(pl.LightningModule):
     # classic DDPM with Gaussian diffusion, in image space
@@ -93,11 +129,28 @@ class DDPM(pl.LightningModule):
         self.channels = channels
         self.use_positional_encodings = use_positional_encodings
         self.model = DiffusionWrapper(unet_config, conditioning_key)
+
+        '''
+        added by xiangyu
+        '''
+        # self.model.eval()
+        # for param in self.model.parameters():
+        #     param.requires_grad = False
+
+        # self.model.freeze()
+
         count_params(self.model, verbose=True)
         self.use_ema = use_ema
         if self.use_ema:
             self.model_ema = LitEma(self.model)
             print(f"Keeping EMAs of {len(list(self.model_ema.buffers()))}.")
+
+            '''
+            added by xiangyu
+            '''
+            # self.model_ema.eval()   
+            # for param in self.model_ema.parameters():
+            #     param.requires_grad = False
 
         self.use_scheduler = scheduler_config is not None
         if self.use_scheduler:
@@ -117,6 +170,10 @@ class DDPM(pl.LightningModule):
                 assert self.use_ema
                 print(f"Resetting ema to pure model weights. This is useful when restoring from an ema-only checkpoint.")
                 self.model_ema = LitEma(self.model)
+                '''
+                added by Xiangyu
+                '''
+                # self.model_ema.eval()
         if reset_num_ema_updates:
             print(" +++++++++++ WARNING: RESETTING NUM_EMA UPDATES TO ZERO +++++++++++ ")
             assert self.use_ema
@@ -135,6 +192,32 @@ class DDPM(pl.LightningModule):
         self.ucg_training = ucg_training or dict()
         if self.ucg_training:
             self.ucg_prng = np.random.RandomState()
+
+        # self.mapping_linear = nn.Sequential(
+        #     nn.Conv2d(197, 8, 3, padding=1),
+        #     nn.GELU(),
+        #     nn.Flatten(),
+        #     nn.Linear(8192, 8192),
+        #     nn.GELU(),
+        #     nn.Linear(8192, 8192),
+        #     nn.GELU(),
+        #     nn.Linear(8192, 8192),
+        #     # nn.GELU(),
+        #     # nn.Linear(41984, 41984)
+        # )
+
+        # for param in self.mapping_linear.parameters():
+        #     param.requires_grad = True
+
+        
+        # self.conv_map = nn.Conv2d(4, 4, 3, padding=1)
+
+        # self.conv_map = self.conv_map.train()
+        # self.conv_map = self.conv_map.cuda()
+
+        # for param in self.conv_map.parameters():
+        #     param.requires_grad = True
+        
 
     def register_schedule(self, given_betas=None, beta_schedule="linear", timesteps=1000,
                           linear_start=1e-4, linear_end=2e-2, cosine_s=8e-3):
@@ -355,6 +438,7 @@ class DDPM(pl.LightningModule):
                                   return_intermediates=return_intermediates)
 
     def q_sample(self, x_start, t, noise=None):
+        # print(x_start)
         noise = default(noise, lambda: torch.randn_like(x_start))
         return (extract_into_tensor(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start +
                 extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise)
@@ -418,6 +502,7 @@ class DDPM(pl.LightningModule):
         return self.p_losses(x, t, *args, **kwargs)
 
     def get_input(self, batch, k):
+        # print("get_input", k, batch[k].shape)
         x = batch[k]
         if len(x.shape) == 3:
             x = x[..., None]
@@ -431,6 +516,7 @@ class DDPM(pl.LightningModule):
         return loss, loss_dict
 
     def training_step(self, batch, batch_idx):
+
         for k in self.ucg_training:
             p = self.ucg_training[k]["p"]
             val = self.ucg_training[k]["val"]
@@ -476,6 +562,7 @@ class DDPM(pl.LightningModule):
 
     @torch.no_grad()
     def log_images(self, batch, N=8, n_row=2, sample=True, return_keys=None, **kwargs):
+        print("log images 3")
         log = dict()
         x = self.get_input(batch, self.first_stage_key)
         N = min(x.shape[0], N)
@@ -513,11 +600,29 @@ class DDPM(pl.LightningModule):
         return log
 
     def configure_optimizers(self):
+        print("configure optimizer 1")
         lr = self.learning_rate
+        # params = list()
         params = list(self.model.parameters())
+        
         if self.learn_logvar:
             params = params + [self.logvar]
+
+        '''
+        add the parameters of project layers to the params list for training
+        '''
+        # params = params + list(self.proj_layer.parameters())
+        project_params = list(self.proj_layer.parameters())
+
+        if self.learn_logvar:
+            print('Diffusion model optimizing logvar')
+            params.append(self.logvar)
         opt = torch.optim.AdamW(params, lr=lr)
+        # opt = torch.optim.AdamW([{'params': params, 'lr': lr}, {'params': project_params, 'lr': 1e-5}])
+
+        # opt = torch.optim.AdamW([{'params': params, 'lr': 1e-5}])
+        
+        # opt = torch.optim.AdamW(params, lr=lr)
         return opt
 
 
@@ -588,8 +693,9 @@ class LatentDiffusion(DDPM):
         self.cond_ids[:self.num_timesteps_cond] = ids
 
     @rank_zero_only
-    @torch.no_grad()
-    def on_train_batch_start(self, batch, batch_idx):
+    # @torch.no_grad()
+    # if no dataloader_idx, it will report incompatible arguments
+    def on_train_batch_start(self, batch, batch_idx, dataloader_idx):
         # only for very first batch
         if self.scale_by_std and self.current_epoch == 0 and self.global_step == 0 and batch_idx == 0 and not self.restarted_from_ckpt:
             assert self.scale_factor == 1., 'rather not use custom rescaling and std-rescaling simultaneously'
@@ -662,10 +768,65 @@ class LatentDiffusion(DDPM):
             raise NotImplementedError(f"encoder_posterior of type '{type(encoder_posterior)}' not yet implemented")
         return self.scale_factor * z
 
-    def get_learned_conditioning(self, c):
+    def get_learned_conditioning(self, c, goods=None):
+        # print("self.cond_stage_forward", self.cond_stage_forward)
         if self.cond_stage_forward is None:
+            # here
             if hasattr(self.cond_stage_model, 'encode') and callable(self.cond_stage_model.encode):
-                c = self.cond_stage_model.encode(c)
+                # here
+
+                ''''
+                check whether the model is successfully trained
+                '''
+                # for name, param in self.proj_layer.named_parameters():
+                #     if name == 'conv1.weight':
+                #         print(f"Layer: {name}, Size: {param.size()}, Values: {param[0][0]}")
+
+                # for name, param in self.model.named_parameters():
+                #     if name == 'diffusion_model.output_blocks.0.0.in_layers.2.weight':
+                #         print(f"Layer: {name}, Size: {param.size()}, Values: {param}")
+
+                # for name, param in self.cond_stage_model.named_parameters():
+                #     if name == 'model.transformer.resblocks.0.ln_1.weight':
+                #         print(f"Layer: {name}, Size: {param.size()}, Values: {param}")
+
+                c = self.cond_stage_model.encode(c, goods=goods, mapping_linear=self.proj_layer)
+
+                '''
+                new
+                '''
+                # tokens = self.cond_stage_model.encode_token(c)
+
+                # image_embedding = None
+                # if goods is not None:
+                #     # goods = goods.permute(0, 3, 1, 2)
+                #     # print(goods.shape)
+                #     # image_embedding = self.model_for_image.encode(goods)
+
+                #     # torch.Size([1, 3, 1024])
+                #     # print(image_embedding.shape)
+                #     image_embedding = goods
+
+                #     '''
+                #     flatten image embedding
+                #     '''
+                #     shape = image_embedding.shape
+                #     image_embedding = torch.flatten(image_embedding, start_dim=1)
+                #     # from (batch_size, 41, 1024) to (batch_size, 41, 32, 32)
+                #     image_embedding = image_embedding.reshape(shape[0], shape[1], 32, 32)
+                #     image_embedding = self.proj_layer(image_embedding.float())
+                #     shape = (shape[0], 8, 1024)
+                #     # image_embedding = image_embedding.reshape(shape[0], shape[1], -1)
+                #     # print(image_embedding.shape)
+                #     # torch.Size([1, 3072])
+                #     '''
+                #     unfold image embedding
+                #     '''
+                #     image_embedding = torch.reshape(image_embedding, shape)
+
+                # c = self.cond_stage_model.encode_embedding(tokens.to(self.device), image_embedding=image_embedding)
+
+
                 if isinstance(c, DiagonalGaussianDistribution):
                     c = c.mode()
             else:
@@ -764,9 +925,16 @@ class LatentDiffusion(DDPM):
 
         return fold, unfold, normalization, weighting
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def get_input(self, batch, k, return_first_stage_outputs=False, force_c_encode=False,
                   cond_key=None, return_original_cond=False, bs=None, return_x=False):
+
+        '''
+        bs is None
+        '''
+        # print("*" * 100)
+        # print(bs)
+        # print("*" * 100)
         x = super().get_input(batch, k)
         if bs is not None:
             x = x[:bs]
@@ -775,20 +943,71 @@ class LatentDiffusion(DDPM):
         z = self.get_first_stage_encoding(encoder_posterior).detach()
 
         if self.model.conditioning_key is not None and not self.force_null_conditioning:
+            '''
+            ****************************************************************************************************
+            WARNING: conditioning is not null
+            ****************************************************************************************************
+            '''
+            # print("*" * 100)
+            # print("WARNING: conditioning is not null")
+            # print("*" * 100)
             if cond_key is None:
                 cond_key = self.cond_stage_key
             if cond_key != self.first_stage_key:
                 if cond_key in ['caption', 'coordinates_bbox', "txt"]:
                     xc = batch[cond_key]
+                    '''
+                    ****************************************************************************************************
+                    cond_key in ['caption', 'coordinates_bbox', 'txt']:, xc.shape 
+                    ['sketch, a drawing of a man with his arms crossed', 
+                    'ink_painting, a painting of a man sitting on a rock', 
+                    'kids_drawing, a drawing of a child sleeping in a bed with a bedside table and a bed', 
+                    'sculpture, a statue of a mermaid on a rocky beach', 
+                    'cartoon, two girls in school uniforms are holding boxes', 
+                    'relief, a stone statue of a man holding a sword', 
+                    'digital_art, a colorful mural of a man standing on a street', 
+                    'drama, a group of women in colorful dresses are walking in a field', 
+                    'acrobatics, a woman and child doing yoga in a room', 
+                    'garage_kits, a figurine of a girl holding a sword', 
+                    'drama, a woman in a black dress with a white lace top', 
+                    "stained_glass, stained glass window in the church of saint-louis-de-l'arrond"]
+                    ****************************************************************************************************
+                    '''
+                    # print("*" * 100)
+                    # print("cond_key in ['caption', 'coordinates_bbox', 'txt']:, xc.shape", xc)
+                    # print("*" * 100)
                 elif cond_key in ['class_label', 'cls']:
                     xc = batch
                 else:
                     xc = super().get_input(batch, cond_key).to(self.device)
             else:
                 xc = x
+            
+            # print("self.cond_stage_trainable", self.cond_stage_trainable)
+            # print("force_c_encode", force_c_encode)
             if not self.cond_stage_trainable or force_c_encode:
+                # print("WARNING: not self.cond_stage_trainable or force_c_encode")
+
                 if isinstance(xc, dict) or isinstance(xc, list):
-                    c = self.get_learned_conditioning(xc)
+                    '''
+                    ****************************************************************************************************
+                    batch['goods'].shape torch.Size([12, 512, 512, 3])
+                    ****************************************************************************************************
+                    '''
+                    # print("*" * 100)
+                    # print("batch['goods'].shape", batch['goods'].shape)
+                    # print("*" * 100)
+                    # , goods=batch['goods']
+                    c = self.get_learned_conditioning(xc, goods=batch['goods'].to(self.device))
+                    # print("image embeddings are added into text tokens")
+                    '''
+                    ****************************************************************************************************
+                    1: c.shape torch.Size([12, 77, 1024])
+                    ****************************************************************************************************
+                    '''
+                    # print("*" * 100)
+                    # print("1: c.shape", c.shape)
+                    # print("*" * 100)
                 else:
                     c = self.get_learned_conditioning(xc.to(self.device))
             else:
@@ -797,11 +1016,17 @@ class LatentDiffusion(DDPM):
                 c = c[:bs]
 
             if self.use_positional_encodings:
+                # print("*" * 100)
+                # print("WARNING: use_positional_encodings is True")
+                # print("*" * 100)
                 pos_x, pos_y = self.compute_latent_shifts(batch)
                 ckey = __conditioning_keys__[self.model.conditioning_key]
                 c = {ckey: c, 'pos_x': pos_x, 'pos_y': pos_y}
 
         else:
+            # print("*" * 100)
+            # print("WARNING: conditioning is null")
+            # print("*" * 100)
             c = None
             xc = None
             if self.use_positional_encodings:
@@ -815,6 +1040,10 @@ class LatentDiffusion(DDPM):
             out.extend([x])
         if return_original_cond:
             out.append(xc)
+        # print("z.shape", z.shape)
+        # print("*" * 100)
+        # print(len(out))
+        # print("*" * 100)
         return out
 
     @torch.no_grad()
@@ -833,23 +1062,54 @@ class LatentDiffusion(DDPM):
         return self.first_stage_model.encode(x)
 
     def shared_step(self, batch, **kwargs):
+        # here
         x, c = self.get_input(batch, self.first_stage_key)
+        # print("in shared step: ", x.shape, c)
+        # print("x.shape", x.shape)
+        # print("c.shape", c.shape)
+
+        # x = self.conv_map(x)
+        # put the project layer here for gradient update
+        # x = self.proj_layer(x)
+
+
+        # z, c, x, xrec, xc = 
+
+
+
+        # print("x[0]: ", x[0])
+        # for name, param in self.conv_map.named_parameters():
+        #     print(f"Layer: {name}, Size: {param.size()}, Values: {param}")
+
+        # print("c", c)
         loss = self(x, c)
         return loss
 
     def forward(self, x, c, *args, **kwargs):
+        # here
         t = torch.randint(0, self.num_timesteps, (x.shape[0],), device=self.device).long()
+        # print("self.model.conditioning_key", self.model.conditioning_key)
         if self.model.conditioning_key is not None:
             assert c is not None
             if self.cond_stage_trainable:
-                c = self.get_learned_conditioning(c)
+                '''
+                ????
+                '''
+                # c = self.get_learned_conditioning(c)
+                '''
+                changed by xiangyu
+                '''
+                pass
             if self.shorten_cond_schedule:  # TODO: drop this option
                 tc = self.cond_ids[t].to(self.device)
                 c = self.q_sample(x_start=c, t=tc, noise=torch.randn_like(c.float()))
         return self.p_losses(x, c, t, *args, **kwargs)
 
-    def apply_model(self, x_noisy, t, cond, return_ids=False):
+    def apply_model(self, x_noisy, t, cond, return_ids=False, flag=None):
+        # print("flags: ", flag)
+
         if isinstance(cond, dict):
+            # print("cond is a dict")
             # hybrid case, cond is expected to be a dict
             pass
         else:
@@ -857,6 +1117,8 @@ class LatentDiffusion(DDPM):
                 cond = [cond]
             key = 'c_concat' if self.model.conditioning_key == 'concat' else 'c_crossattn'
             cond = {key: cond}
+        
+        # print("cond", cond)
 
         x_recon = self.model(x_noisy, t, **cond)
 
@@ -887,6 +1149,9 @@ class LatentDiffusion(DDPM):
         noise = default(noise, lambda: torch.randn_like(x_start))
         x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
         model_output = self.apply_model(x_noisy, t, cond)
+
+        # from torchviz import make_dot
+        # make_dot(model_output, params=dict(self.model.named_parameters())).render("attached", format="png")
 
         loss_dict = {}
         prefix = 'train' if self.training else 'val'
@@ -1110,19 +1375,21 @@ class LatentDiffusion(DDPM):
     @torch.no_grad()
     def sample_log(self, cond, batch_size, ddim, ddim_steps, **kwargs):
         if ddim:
+            # here
             ddim_sampler = DDIMSampler(self)
             shape = (self.channels, self.image_size, self.image_size)
             samples, intermediates = ddim_sampler.sample(ddim_steps, batch_size,
                                                          shape, cond, verbose=False, **kwargs)
-
+            
         else:
             samples, intermediates = self.sample(cond=cond, batch_size=batch_size,
                                                  return_intermediates=True, **kwargs)
 
         return samples, intermediates
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def get_unconditional_conditioning(self, batch_size, null_label=None):
+        print("null label: ", null_label)
         if null_label is not None:
             xc = null_label
             if isinstance(xc, ListConfig):
@@ -1152,6 +1419,7 @@ class LatentDiffusion(DDPM):
                    plot_diffusion_rows=True, unconditional_guidance_scale=1., unconditional_guidance_label=None,
                    use_ema_scope=True,
                    **kwargs):
+        print("log images 2")
         ema_scope = self.ema_scope if use_ema_scope else nullcontext
         use_ddim = ddim_steps is not None
 
@@ -1277,15 +1545,30 @@ class LatentDiffusion(DDPM):
         return log
 
     def configure_optimizers(self):
+        print("configure optimizer 2")
         lr = self.learning_rate
+        # params = list()
+        # for param in self.model.parameters():
+        #     param.requires_grad = False
         params = list(self.model.parameters())
+
         if self.cond_stage_trainable:
             print(f"{self.__class__.__name__}: Also optimizing conditioner params!")
             params = params + list(self.cond_stage_model.parameters())
+
+        '''
+        add the parameters of project layers to the params list for training
+        '''
+        project_params = list(self.proj_layer.parameters())
+
         if self.learn_logvar:
             print('Diffusion model optimizing logvar')
             params.append(self.logvar)
-        opt = torch.optim.AdamW(params, lr=lr)
+
+        # opt = torch.optim.AdamW(project_params, lr=lr)
+        
+        opt = torch.optim.AdamW([{'params': params, 'lr': lr}, {'params': project_params, 'lr': lr}])
+        # opt = torch.optim.AdamW([{'params': project_params, 'lr': 1e-5}])
         if self.use_scheduler:
             assert 'target' in self.scheduler_config
             scheduler = instantiate_from_config(self.scheduler_config)
@@ -1309,7 +1592,10 @@ class LatentDiffusion(DDPM):
         x = 2. * (x - x.min()) / (x.max() - x.min()) - 1.
         return x
 
-
+'''
+added by xiangyu
+'''
+# @torch.no_grad()
 class DiffusionWrapper(pl.LightningModule):
     def __init__(self, diff_model_config, conditioning_key):
         super().__init__()
@@ -1318,7 +1604,25 @@ class DiffusionWrapper(pl.LightningModule):
         self.conditioning_key = conditioning_key
         assert self.conditioning_key in [None, 'concat', 'crossattn', 'hybrid', 'adm', 'hybrid-adm', 'crossattn-adm']
 
+        '''
+        added by xiangyu
+        '''
+        # self.diffusion_model = self.diffusion_model.eval()
+        # self.diffusion_model.train = disabled_train
+        # for param in self.diffusion_model.parameters():
+        #     param.requires_grad = False
+
+        # for param in self.diffusion_model.parameters():
+        #     param.requires_grad = False
+
+    # here
+    # c_concat and c_crossattn are two keys of the passes conditioning dict
     def forward(self, x, t, c_concat: list = None, c_crossattn: list = None, c_adm=None):
+        # print("*"*100)
+        # print("forward: ", self.conditioning_key)
+        # print("*"*100)
+        # print("c_concat: ", c_concat.shape)
+        # print("c_crossattn: ", c_crossattn.shape)
         if self.conditioning_key is None:
             out = self.diffusion_model(x, t)
         elif self.conditioning_key == 'concat':
@@ -1374,7 +1678,7 @@ class LatentUpscaleDiffusion(LatentDiffusion):
         for param in self.low_scale_model.parameters():
             param.requires_grad = False
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def get_input(self, batch, k, cond_key=None, bs=None, log_mode=False):
         if not log_mode:
             z, c = super().get_input(batch, k, force_c_encode=True, bs=bs)
@@ -1401,10 +1705,14 @@ class LatentUpscaleDiffusion(LatentDiffusion):
                    plot_denoise_rows=False, plot_progressive_rows=True, plot_diffusion_rows=True,
                    unconditional_guidance_scale=1., unconditional_guidance_label=None, use_ema_scope=True,
                    **kwargs):
+
+        print("log images 1")
         ema_scope = self.ema_scope if use_ema_scope else nullcontext
         use_ddim = ddim_steps is not None
 
         log = dict()
+
+
         z, c, x, xrec, xc, x_low, x_low_rec, noise_level = self.get_input(batch, self.first_stage_key, bs=N,
                                                                           log_mode=True)
         N = min(x.shape[0], N)
@@ -1562,10 +1870,15 @@ class LatentFinetuneDiffusion(LatentDiffusion):
                    plot_diffusion_rows=True, unconditional_guidance_scale=1., unconditional_guidance_label=None,
                    use_ema_scope=True,
                    **kwargs):
+        '''
+        This one
+        '''
+        print("log images 10")
         ema_scope = self.ema_scope if use_ema_scope else nullcontext
         use_ddim = ddim_steps is not None
 
         log = dict()
+        # print("log images 10, get input")
         z, c, x, xrec, xc = self.get_input(batch, self.first_stage_key, bs=N, return_first_stage_outputs=True)
         c_cat, c = c["c_concat"][0], c["c_crossattn"][0]
         N = min(x.shape[0], N)
@@ -1654,7 +1967,7 @@ class LatentInpaintDiffusion(LatentFinetuneDiffusion):
         self.masked_image_key = masked_image_key
         assert self.masked_image_key in concat_keys
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def get_input(self, batch, k, cond_key=None, bs=None, return_first_stage_outputs=False):
         # note: restricted to non-trainable encoders currently
         assert not self.cond_stage_trainable, 'trainable cond stages not yet supported for inpainting'
@@ -1682,6 +1995,7 @@ class LatentInpaintDiffusion(LatentFinetuneDiffusion):
 
     @torch.no_grad()
     def log_images(self, *args, **kwargs):
+        print("log images 9")
         log = super(LatentInpaintDiffusion, self).log_images(*args, **kwargs)
         log["masked_image"] = rearrange(args[0]["masked_image"],
                                         'b h w c -> b c h w').to(memory_format=torch.contiguous_format).float()
@@ -1698,7 +2012,7 @@ class LatentDepth2ImageDiffusion(LatentFinetuneDiffusion):
         self.depth_model = instantiate_from_config(depth_stage_config)
         self.depth_stage_key = concat_keys[0]
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def get_input(self, batch, k, cond_key=None, bs=None, return_first_stage_outputs=False):
         # note: restricted to non-trainable encoders currently
         assert not self.cond_stage_trainable, 'trainable cond stages not yet supported for depth2img'
@@ -1733,6 +2047,7 @@ class LatentDepth2ImageDiffusion(LatentFinetuneDiffusion):
 
     @torch.no_grad()
     def log_images(self, *args, **kwargs):
+        print("log images 8")
         log = super().log_images(*args, **kwargs)
         depth = self.depth_model(args[0][self.depth_stage_key])
         depth_min, depth_max = torch.amin(depth, dim=[1, 2, 3], keepdim=True), \
@@ -1763,7 +2078,7 @@ class LatentUpscaleFinetuneDiffusion(LatentFinetuneDiffusion):
         for param in self.low_scale_model.parameters():
             param.requires_grad = False
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def get_input(self, batch, k, cond_key=None, bs=None, return_first_stage_outputs=False):
         # note: restricted to non-trainable encoders currently
         assert not self.cond_stage_trainable, 'trainable cond stages not yet supported for upscaling-ft'
@@ -1799,6 +2114,7 @@ class LatentUpscaleFinetuneDiffusion(LatentFinetuneDiffusion):
 
     @torch.no_grad()
     def log_images(self, *args, **kwargs):
+        print("log images 7")
         log = super().log_images(*args, **kwargs)
         log["lr"] = rearrange(args[0]["lr"], 'b h w c -> b c h w')
         return log
@@ -1852,6 +2168,7 @@ class ImageEmbeddingConditionedLatentDiffusion(LatentDiffusion):
 
     @torch.no_grad()
     def log_images(self, batch, N=8, n_row=4, **kwargs):
+        print("log images 6")
         log = dict()
         z, c, x, xrec, xc = self.get_input(batch, self.first_stage_key, bs=N, return_first_stage_outputs=True,
                                            return_original_cond=True)
@@ -1875,7 +2192,6 @@ class ImageEmbeddingConditionedLatentDiffusion(LatentDiffusion):
             log[f"samplescfg_scale_{unconditional_guidance_scale:.2f}"] = x_samples_cfg
         return log
 
- 
 
 class LatentPoseText2ImageDiffusion_HumanSD(LatentFinetuneDiffusion):
     """
@@ -1906,7 +2222,7 @@ class LatentPoseText2ImageDiffusion_HumanSD(LatentFinetuneDiffusion):
         self.estimate_thresh=estimate_thresh
         self.pose_loss_weight=pose_loss_weight
     
-    @torch.no_grad()
+    # @torch.no_grad()
     def get_input(self, batch, k, cond_key=None, bs=None, return_first_stage_outputs=False):
         # note: restricted to non-trainable encoders currently
         assert not self.cond_stage_trainable, 'trainable cond stages not yet supported for depth2img'
@@ -1936,6 +2252,7 @@ class LatentPoseText2ImageDiffusion_HumanSD(LatentFinetuneDiffusion):
 
     @torch.no_grad()
     def log_images(self, *args, **kwargs):
+        print("log images 5")
         log = super().log_images(*args, **kwargs)
         pose_image = args[0][self.pose_stage_key]
         pose_image = rearrange(pose_image, 'b h w c -> b c h w')
@@ -2043,8 +2360,8 @@ class LatentPoseText2ImageDiffusion_HumanSD(LatentFinetuneDiffusion):
 
 
         return loss, loss_dict
-       
 
+ 
 class LatentPoseText2ImageDiffusion_HumanSD_originalloss(LatentFinetuneDiffusion):
     """
     The implementation of HumanSD without heatmap-guided loss
@@ -2058,18 +2375,57 @@ class LatentPoseText2ImageDiffusion_HumanSD_originalloss(LatentFinetuneDiffusion
         # concat_keys: the concated key, which is pose_img as processed in ldm/data/humansd.py
         super().__init__(concat_keys=concat_keys, *args, **kwargs)
         self.pose_stage_key = concat_keys[0]
+
+        # projection layer
+        self.proj_layer = ProjLayer(
+            in_dim=1024, out_dim=1024, hidden_dim=4096, drop_p=0.1, eps=1e-12
+        )
+
+        self.proj_layer = self.proj_layer.train()
+        self.proj_layer = self.proj_layer.cuda()
+
+        for param in self.proj_layer.parameters():
+            param.requires_grad = True
     
-    @torch.no_grad()
+    # @torch.no_grad()
     def get_input(self, batch, k, cond_key=None, bs=None, return_first_stage_outputs=False):
         # note: restricted to non-trainable encoders currently
-        assert not self.cond_stage_trainable, 'trainable cond stages not yet supported for depth2img'
+        # assert not self.cond_stage_trainable, 'trainable cond stages not yet supported for depth2img'
+        '''
+        ****************************************************************************************************
+        batch.keys():  dict_keys(['jpg', 'pose', 'txt', 'goods', 'pose_img'])
+        ****************************************************************************************************
+        '''
+        # print("*" * 100)
+        # print("batch.keys(): ", batch.keys())
+        # print("*" * 100)
         z, c, x, xrec, xc = super().get_input(batch, self.first_stage_key, return_first_stage_outputs=True,
                                               force_c_encode=True, return_original_cond=True, bs=bs)
+        
+        '''
+        ****************************************************************************************************
+        z.shape:  torch.Size([12, 4, 64, 64])
+        c.shape:  torch.Size([12, 77, 1024])
+        x.shape:  torch.Size([12, 3, 512, 512])
+        xrec.shape:  torch.Size([12, 3, 512, 512])
+        xc is a list: (12,)
+        ****************************************************************************************************
+        '''
+
+        # print("*" * 100)
+        # print("z.shape: ", z.shape)
+        # print("c.shape: ", c.shape)
+        # print("x.shape: ", x.shape)
+        # print("xrec.shape: ", xrec.shape)
+        # print("xc.shape: ", np.array(xc).shape)
+        # print("*" * 100)
 
         assert exists(self.concat_keys)
         assert len(self.concat_keys) == 1
         c_cat = list()
         for ck in self.concat_keys:
+            # print("ck: ", ck)
+            # print("batch[ck].shape: ", batch[ck].shape)
             cc = batch[ck]
             if len(cc.shape) == 3:
                 cc = cc[..., None]
@@ -2081,14 +2437,24 @@ class LatentPoseText2ImageDiffusion_HumanSD_originalloss(LatentFinetuneDiffusion
             cc = self.get_first_stage_encoding(self.encode_first_stage(cc))
             
             c_cat.append(cc)
+        # print("len(c_cat): ", len(c_cat))
         c_cat = torch.cat(c_cat, dim=1)
+        # print("c_cat.shape: ", c_cat.shape)
+        # print("c.shape: ", c.shape)
         all_conds = {"c_concat": [c_cat], "c_crossattn": [c]}
+
+        # print(all_conds)
+
         if return_first_stage_outputs:
             return z, all_conds, x, xrec, xc
         return z, all_conds
 
     @torch.no_grad()
     def log_images(self, *args, **kwargs):
+        '''
+        This one, call log images 10
+        '''
+        print("log images 4")
         log = super().log_images(*args, **kwargs)
         pose_image = args[0][self.pose_stage_key]
         pose_image = rearrange(pose_image, 'b h w c -> b c h w')
@@ -2115,3 +2481,5 @@ class LatentPoseText2ImageDiffusion_HumanSD_originalloss(LatentFinetuneDiffusion
             
         return log
     
+    # We hide the p_loss function at present.
+    # Will be released after the paper is received.

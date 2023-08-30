@@ -27,11 +27,11 @@ def log_txt_as_img(wh, xc, size=10):
         txt = Image.new("RGB", wh, color="white")
         draw = ImageDraw.Draw(txt)
         font = ImageFont.truetype('data/DejaVuSans.ttf', size=size)
-        nc = int(40 * (wh[0] / 256))
+        nc = int(30 * (wh[0] / 256))
         lines = "\n".join(xc[bi][start:start + nc] for start in range(0, len(xc[bi]), nc))
 
         try:
-            draw.text((0, 0), lines, fill="black", font=font)
+            draw.text((20, 20), lines, fill="black", font=font)
         except UnicodeEncodeError:
             print("Cant encode string for logging. Skipping.")
 

@@ -83,6 +83,8 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
             elif isinstance(layer, SpatialTransformer):
                 x = layer(x, context)
             else:
+                # to float32
+                x = x.float()
                 x = layer(x)
         return x
 
@@ -755,6 +757,9 @@ class UNetModel(nn.Module):
             conv_nd(dims, model_channels, n_embed, 1),
             #nn.LogSoftmax(dim=1)  # change to cross_entropy and produce non-normalized logits
         )
+
+        # for param in self.parameters():
+        #     param.requires_grad = False
 
     def convert_to_fp16(self):
         """

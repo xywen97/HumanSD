@@ -186,7 +186,7 @@ class DDIMSampler(object):
         b, *_, device = *x.shape, x.device
 
         if unconditional_conditioning is None or unconditional_guidance_scale == 1.:
-            model_output = self.model.apply_model(x, t, c)
+            model_output = self.model.apply_model(x, t, c, flag="sample 1")
         else:
             x_in = torch.cat([x] * 2)
             t_in = torch.cat([t] * 2)
@@ -209,7 +209,7 @@ class DDIMSampler(object):
                     c_in.append(torch.cat([unconditional_conditioning[i], c[i]]))
             else:
                 c_in = torch.cat([unconditional_conditioning, c])
-            model_uncond, model_t = self.model.apply_model(x_in, t_in, c_in).chunk(2)
+            model_uncond, model_t = self.model.apply_model(x_in, t_in, c_in, flag="sample 2").chunk(2)
             model_output = model_uncond + unconditional_guidance_scale * (model_t - model_uncond)
 
         if self.model.parameterization == "v":
@@ -272,12 +272,12 @@ class DDIMSampler(object):
         for i in tqdm(range(num_steps), desc='Encoding Image'):
             t = torch.full((x0.shape[0],), i, device=self.model.device, dtype=torch.long)
             if unconditional_guidance_scale == 1.:
-                noise_pred = self.model.apply_model(x_next, t, c)
+                noise_pred = self.model.apply_model(x_next, t, c, flag="sample 3")
             else:
                 assert unconditional_conditioning is not None
                 e_t_uncond, noise_pred = torch.chunk(
                     self.model.apply_model(torch.cat((x_next, x_next)), torch.cat((t, t)),
-                                           torch.cat((unconditional_conditioning, c))), 2)
+                                           torch.cat((unconditional_conditioning, c)), flag="sample 4"), 2)
                 noise_pred = e_t_uncond + unconditional_guidance_scale * (noise_pred - e_t_uncond)
 
             xt_weighted = (alphas_next[i] / alphas[i]).sqrt() * x_next
