@@ -1,5 +1,6 @@
 model:
   base_learning_rate: 5.0e-6
+  # base_learning_rate: 7.0e-6
   target: ldm.models.diffusion.ddpm.LatentPoseText2ImageDiffusion_HumanSD_originalloss
   params:
     linear_start: 0.00085
@@ -11,13 +12,24 @@ model:
     cond_stage_key: "txt"
     image_size: 64
     channels: 4
-    cond_stage_trainable: false
+    cond_stage_trainable: True
     conditioning_key: hybrid
     scale_factor: 0.18215
     monitor: val/loss_simple_ema
-    finetune_keys: ['model.diffusion_model.input_blocks.0.0.weight']
+    # finetune_keys: ['model.diffusion_model.input_blocks.0.0.weight']
+    finetune_keys: []
     use_ema: False # true
-    ckpt_path: humansd_data/checkpoints/v2-1_512-ema-pruned.ckpt
+    # ckpt_path: humansd_data/checkpoints/v2-1_512-ema-pruned.ckpt
+    ckpt_path: humansd_data/checkpoints/humansd-v1.ckpt
+
+    # scheduler_config: # 10000 warmup steps
+    #   target: ldm.lr_scheduler.LambdaLinearScheduler
+    #   params:
+    #     warm_up_steps: [ 1 ] # NOTE for resuming. use 10000 if starting from scratch
+    #     cycle_lengths: [ 10000000000000 ] # incredibly large number to prevent corner cases
+    #     f_start: [ 1.e-6 ]
+    #     f_max: [ 1. ]
+    #     f_min: [ 1. ]
 
     unet_config:
       target: ldm.modules.diffusionmodules.openaimodel.UNetModel
@@ -65,7 +77,7 @@ model:
     cond_stage_config:
       target: ldm.modules.encoders.modules.FrozenOpenCLIPEmbedder
       params:
-        freeze: True
+        freeze: False
         layer: "penultimate"
 
 # added
@@ -73,14 +85,16 @@ data:
   target: main.DataModuleFromConfig
   params:
     batch_size: 4
-    num_workers: 1
+    num_workers: 4
     wrap: False
     train:
       target: ldm.data.humansd.HumanSDPoseTrain
       params:
         image_size: 512
-        map_file: humansd_data/datasets/mapping_train.json
-        base_path: humansd_data/datasets
+        # map_file: humansd_data/datasets/HumanArt_v1/mapping_file_training.json
+        map_file: /research/d5/gds/xywen22/dataset/deepfashionMM/HumanSDp-few3/mapping_file_training.json
+        # base_path: humansd_data/datasets/HumanArt_v1
+        base_path: /research/d5/gds/xywen22/dataset/deepfashionMM/HumanSDp-few3
         max_person_num: 10
         keypoint_num: 17
         keypoint_dim: 3
@@ -108,8 +122,10 @@ data:
       target: ldm.data.humansd.HumanSDPoseValidation
       params:
         image_size: 512
-        map_file: humansd_data/datasets/HumanArt/mapping_validation.json
-        base_path: humansd_data/datasets/HumanArt
+        # map_file: humansd_data/datasets/HumanArt_v1/mapping_file_validation.json
+        map_file: /research/d5/gds/xywen22/dataset/deepfashionMM/HumanSDp-few3/mapping_file_validation.json
+        # base_path: humansd_data/datasets/HumanArt_v1
+        base_path: /research/d5/gds/xywen22/dataset/deepfashionMM/HumanSDp-few3
         max_person_num: 10
         keypoint_num: 17
         keypoint_dim: 3
@@ -151,7 +167,8 @@ lightning:
       params:
         # enable_autocast: False
         disabled: False
-        batch_frequency: 200
+        batch_frequency: 8
+        # batch_frequency: 200
         max_images: 4
         increase_log_steps: False
         log_first_step: False
@@ -161,7 +178,7 @@ lightning:
           plot_progressive_rows: False
           plot_diffusion_rows: False
           N: 4
-          unconditional_guidance_scale: 5.0
+          unconditional_guidance_scale: 3.5
           unconditional_guidance_label: ["longbody, lowres, bad anatomy, bad hands, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality"]
           ddim_steps: 50 
           ddim_eta: 0.0
